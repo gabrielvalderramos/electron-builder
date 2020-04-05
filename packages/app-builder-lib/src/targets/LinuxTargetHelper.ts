@@ -71,14 +71,14 @@ export class LinuxTargetHelper {
     return options.description || this.packager.appInfo.description
   }
 
-  async writeDesktopEntry(targetSpecificOptions: LinuxTargetSpecificOptions, exec?: string, destination?: string | null, extra?: { [key: string]: string; }): Promise<string> {
+  async writeDesktopEntry(targetSpecificOptions: LinuxTargetSpecificOptions, exec?: string, destination?: string | null, extra?: { [key: string]: string }): Promise<string> {
     const data = await this.computeDesktopEntry(targetSpecificOptions, exec, extra)
     const file = destination || await this.packager.getTempFile(`${this.packager.appInfo.productFilename}.desktop`)
     await outputFile(file, data)
     return file
   }
 
-  async computeDesktopEntry(targetSpecificOptions: LinuxTargetSpecificOptions, exec?: string, extra?: { [key: string]: string; }): Promise<string> {
+  async computeDesktopEntry(targetSpecificOptions: LinuxTargetSpecificOptions, exec?: string, extra?: { [key: string]: string }): Promise<string> {
     if (exec != null && exec.length === 0) {
       throw new Error("Specified exec is empty")
     }
@@ -91,11 +91,15 @@ export class LinuxTargetHelper {
     const appInfo = packager.appInfo
 
     const productFilename = appInfo.productFilename
-
+    const executableArgs = targetSpecificOptions.executableArgs
     if (exec == null) {
       exec = `${installPrefix}/${productFilename}/${packager.executableName}`
       if (!/^[/0-9A-Za-z._-]+$/.test(exec)) {
         exec = `"${exec}"`
+      }
+      if (executableArgs) {
+        exec += " "
+        exec += executableArgs.join(" ")
       }
       exec += " %U"
     }

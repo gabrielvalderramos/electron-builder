@@ -23,7 +23,7 @@ import { addCustomMessageFileInclude, createAddLangsMacro, LangConfigurator } fr
 import { computeLicensePage } from "./nsisLicense"
 import { NsisOptions, PortableOptions } from "./nsisOptions"
 import { NsisScriptGenerator } from "./nsisScriptGenerator"
-import { AppPackageHelper, NSIS_PATH, nsisTemplatesDir } from "./nsisUtil"
+import { AppPackageHelper, NSIS_PATH, nsisTemplatesDir, UninstallerReader } from "./nsisUtil"
 
 const debug = _debug("electron-builder:nsis")
 
@@ -167,7 +167,7 @@ export class NsisTarget extends Target {
       APP_PACKAGE_NAME: appInfo.name
     }
     if (uninstallAppKey !== guid) {
-      defines.UNINSTALL_REGISTRY_KEY_2 = `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{${guid}}`
+      defines.UNINSTALL_REGISTRY_KEY_2 = `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}`
     }
 
     const commands: any = {
@@ -231,6 +231,10 @@ export class NsisTarget extends Target {
       const portableOptions = options as PortableOptions
       defines.REQUEST_EXECUTION_LEVEL = portableOptions.requestExecutionLevel || "user"
       defines.UNPACK_DIR_NAME = portableOptions.unpackDirName || (await executeAppBuilder(["ksuid"]))
+
+      if (portableOptions.splashImage != null) {
+        defines.SPLASH_IMAGE = portableOptions.splashImage
+      }
     }
     else {
       await this.configureDefines(oneClick, defines)
@@ -261,8 +265,21 @@ export class NsisTarget extends Target {
       return
     }
 
+    // prepare short-version variants of defines and commands, to make an uninstaller that doesn't differ much from the previous one
+    const definesUninstaller: any = { ...defines }
+    const commandsUninstaller: any = { ...commands}
+    if (appInfo.shortVersion != null) {
+      definesUninstaller.VERSION = appInfo.shortVersion
+      commandsUninstaller.VIProductVersion = appInfo.shortVersionWindows
+      commandsUninstaller.VIAddVersionKey = this.computeVersionKey(true)
+    }
+
     const sharedHeader = await this.computeCommonInstallerScriptHeader()
-    const script = isPortable ? await readFile(path.join(nsisTemplatesDir, "portable.nsi"), "utf8") : await this.computeScriptAndSignUninstaller(defines, commands, installerPath, sharedHeader)
+    const script = isPortable ? await readFile(path.join(nsisTemplatesDir, "portable.nsi"), "utf8") : await this.computeScriptAndSignUninstaller(definesUninstaller, commandsUninstaller, installerPath, sharedHeader)
+
+    // copy outfile name into main options, as the computeScriptAndSignUninstaller function was kind enough to add important data to temporary defines.
+    defines.UNINSTALLER_OUT_FILE = definesUninstaller.UNINSTALLER_OUT_FILE
+
     await this.executeMakensis(defines, commands, sharedHeader + await this.computeFinalScript(script, true))
     await Promise.all<any>([packager.sign(installerPath), defines.UNINSTALLER_OUT_FILE == null ? Promise.resolve() : unlink(defines.UNINSTALLER_OUT_FILE)])
 
@@ -324,13 +341,21 @@ export class NsisTarget extends Target {
 
     // http://forums.winamp.com/showthread.php?p=3078545
     if (isMacOsCatalina()) {
-      (await packager.vm.value).exec(installerPath, [])
+      try {
+        UninstallerReader.exec(installerPath, uninstallerPath)
+      }
+      catch (error) {
+        log.warn("packager.vm is used: " + error.message)
 
-      // Parallels VM can exit after command execution, but NSIS continue to be running
-      let i = 0
-      while (!(await exists(uninstallerPath)) && i++ < 100) {
-        // noinspection JSUnusedLocalSymbols
-        await new Promise((resolve, _reject) => setTimeout(resolve, 300))
+        const vm = await packager.vm.value
+        await vm.exec(installerPath, [])
+        // Parallels VM can exit after command execution, but NSIS continue to be running
+        let i = 0
+        while (!(await exists(uninstallerPath)) && i++ < 100) {
+          // noinspection JSUnusedLocalSymbols
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          await new Promise((resolve, _reject) => setTimeout(resolve, 300))
+        }
       }
     }
     else {
@@ -344,7 +369,7 @@ export class NsisTarget extends Target {
     return script
   }
 
-  private computeVersionKey() {
+  private computeVersionKey(short: boolean = false) {
     // Error: invalid VIProductVersion format, should be X.X.X.X
     // so, we must strip beta
     const localeId = this.options.language || "1033"
@@ -356,6 +381,10 @@ export class NsisTarget extends Target {
       `/LANG=${localeId} FileDescription "${appInfo.description}"`,
       `/LANG=${localeId} FileVersion "${appInfo.buildVersion}"`,
     ]
+    if (short) {
+      versionKey[1] = `/LANG=${localeId} ProductVersion "${appInfo.shortVersion}"`
+      versionKey[4] = `/LANG=${localeId} FileVersion "${appInfo.shortVersion}"`
+    }
     use(this.packager.platformSpecificBuildOptions.legalTrademarks, it => versionKey.push(`/LANG=${localeId} LegalTrademarks "${it}"`))
     use(appInfo.companyName, it => versionKey.push(`/LANG=${localeId} CompanyName "${it}"`))
     return versionKey
